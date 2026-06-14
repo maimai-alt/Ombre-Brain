@@ -482,10 +482,28 @@ async def _merge_or_create(
         await embedding_engine.generate_and_store(bucket_id, content)
     except Exception:
         pass
+        
     return bucket_id, False
 
 
 # =============================================================
+def _format_raw(content: str, metadata: dict = None) -> str:
+    header = ""
+    if metadata and isinstance(metadata, dict):
+        bucket_id = metadata.get("id", "")
+        name = metadata.get("name", "未命名")
+        domains = ", ".join(metadata.get("domain", []))
+        try:
+            valence = float(metadata.get("valence", 0.5))
+            arousal = float(metadata.get("arousal", 0.3))
+        except (ValueError, TypeError):
+            valence, arousal = 0.5, 0.3
+        header = f"[bucket_id:{bucket_id}] 📌 记忆桶: {name}"
+        if domains:
+            header += f" [主题:{domains}]"
+        header += f" [情感:V{valence:.1f}/A{arousal:.1f}]"
+        header += "\n"
+    return f"{header}{content}"
 # Tool 1: breath — Breathe
 # 工具 1：breath — 呼吸
 #
@@ -503,6 +521,7 @@ async def breath(
     arousal: float = -1,
     max_results: int = 20,
     importance_min: int = -1,
+    raw: bool = True,
 ) -> str:
     """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取(不走语义搜索,按importance降序返回最多20条)。"""
     await decay_engine.ensure_started()
@@ -532,7 +551,10 @@ async def breath(
                 break
             try:
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                if raw:
+                    summary = _format_raw(b["content"], b["metadata"])
+                else:
+                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
                 t = count_tokens_approx(summary)
                 if token_used + t > max_tokens:
                     break
@@ -562,7 +584,10 @@ async def breath(
         for b in pinned_buckets:
             try:
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                if raw:
+                    summary = _format_raw(b["content"], b["metadata"])
+                else:
+                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
                 pinned_results.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
             except Exception as e:
                 logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
@@ -632,7 +657,10 @@ async def breath(
                 break
             try:
                 clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                if raw:
+                    summary = _format_raw(b["content"], b["metadata"])
+                else:
+                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
                 summary_tokens = count_tokens_approx(summary)
                 if summary_tokens > token_budget:
                     break
@@ -726,7 +754,10 @@ async def breath(
                 original_v = float(clean_meta.get("valence", 0.5))
                 shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
                 clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+            if raw:
+                summary = _format_raw(bucket["content"], bucket["metadata"])
+            else:
+                summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
             summary_tokens = count_tokens_approx(summary)
             if token_used + summary_tokens > max_tokens:
                 break
@@ -757,6 +788,9 @@ async def breath(
                 drift_results = []
                 for b in drifted:
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                    if raw:
+                    summary = _format_raw(b["content"], b["metadata"])
+                else:
                     summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
                     drift_results.append(f"[surface_type: random]\n{summary}")
                 results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
