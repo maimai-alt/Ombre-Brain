@@ -789,9 +789,9 @@ async def breath(
                 for b in drifted:
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
                     if raw:
-                    summary = _format_raw(b["content"], b["metadata"])
-                else:
-                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                        summary = _format_raw(b["content"], b["metadata"])
+                    else:
+                        summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
                     drift_results.append(f"[surface_type: random]\n{summary}")
                 results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
         except Exception as e:
