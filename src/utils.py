@@ -178,6 +178,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
             "timeout_seconds": 60,
         },
         "decay": {
+            "enabled": True,
             "lambda": 0.05,
             "threshold": 0.3,
             "check_interval_hours": 24,
@@ -234,11 +235,38 @@ def load_config(config_path: Optional[str] = None) -> dict:
         config.get("mcp_require_auth", True), default=True
     )
 
+    # Decay is a write-capable background service. Invalid boolean values fail
+    # safe to disabled instead of silently preserving the default-on behavior.
+    decay_cfg = config.get("decay")
+    if not isinstance(decay_cfg, dict):
+        logging.warning(
+            "Invalid decay configuration; automatic decay is disabled"
+        )
+        decay_cfg = {}
+        config["decay"] = decay_cfg
+    try:
+        decay_cfg["enabled"] = parse_bool(decay_cfg.get("enabled", True))
+    except ValueError:
+        logging.warning(
+            "Invalid decay.enabled boolean; automatic decay is disabled"
+        )
+        decay_cfg["enabled"] = False
+
     # --- Environment variable overrides (highest priority) ---
     # --- 环境变量覆盖敏感/运行时配置（优先级最高）---
     # 这里曾经有 6 段几乎一模一样的 if-block，每段都在做同一件事：
     #   "若环境变量非空 → 写到 config 的某个嵌套 key 上"
     # 现在统一走 _apply_env_override()，新增一项只要加一行表项。
+
+    _env_decay_enabled = os.environ.get("OMBRE_DECAY_ENABLED", "").strip()
+    if _env_decay_enabled:
+        try:
+            decay_cfg["enabled"] = parse_bool(_env_decay_enabled)
+        except ValueError:
+            logging.warning(
+                "Invalid OMBRE_DECAY_ENABLED boolean; automatic decay is disabled"
+            )
+            decay_cfg["enabled"] = False
 
     # 压缩组（脱水/打标/合并）—— 写到 config["dehydration"][*]
     _apply_env_override(config, "OMBRE_COMPRESS_API_KEY", "dehydration", "api_key")

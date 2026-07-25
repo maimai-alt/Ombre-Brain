@@ -123,6 +123,14 @@ github_sync_instance = None
 v3_runtime = None
 
 
+def decay_engine_status() -> str:
+    """Return a backward-compatible observable DecayEngine state."""
+    state = getattr(decay_engine, "status", "")
+    if state in {"running", "disabled", "stopped", "error"}:
+        return state
+    return "running" if bool(getattr(decay_engine, "is_running", False)) else "stopped"
+
+
 def init(cfg: dict) -> None:
     """启动时由 server.py 调用，注入全局 config。"""
     global config
@@ -266,6 +274,10 @@ restart_github_auto_task = None # def(interval_minutes: int) -> None（起停后
 # --- 项目 .env 读写（config / env-config / host-vault 路由共用，故放共享层）---
 # 与原 server.py 行为一致：.env 落在 src/.env。本文件在 src/web/ 下，上两级即 src/。
 def _project_env_path() -> str:
+    if os.environ.get("OMBRE_TEST_ISOLATED") == "1":
+        isolated_path = os.environ.get("OMBRE_TEST_PROJECT_ENV_PATH", "").strip()
+        if isolated_path:
+            return isolated_path
     return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 
 

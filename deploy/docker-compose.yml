@@ -31,6 +31,9 @@ services:
       - "${OMBRE_HOST_PORT:-18001}:8000"
     environment:
       - OMBRE_TRANSPORT=streamable-http
+      # Empty means "no env override" in load_config(), so YAML/defaults still win
+      # when OMBRE_DECAY_ENABLED is absent from the host or Compose .env file.
+      - OMBRE_DECAY_ENABLED=${OMBRE_DECAY_ENABLED-}
       - OMBRE_EMBED_BACKEND=${OMBRE_EMBED_BACKEND:-api}
       - OMBRE_COMPRESS_API_KEY=${OMBRE_COMPRESS_API_KEY}
       - OMBRE_COMPRESS_BASE_URL=${OMBRE_COMPRESS_BASE_URL:-}

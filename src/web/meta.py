@@ -834,7 +834,7 @@ def register(mcp) -> None:
         try:
             stats = await sh.bucket_mgr.get_stats()
             return JSONResponse({
-                "decay_engine": "running" if sh.decay_engine.is_running else "stopped",
+                "decay_engine": sh.decay_engine_status(),
                 "embedding_enabled": sh.embedding_engine.enabled,
                 "buckets": {
                     "permanent": stats.get("permanent_count", 0),

@@ -32,6 +32,9 @@ services:
       - "${OMBRE_HOST_PORT:-18001}:8000"
     environment:
       - OMBRE_TRANSPORT=streamable-http
+      # Empty means "no env override" in load_config(), so YAML/defaults still win
+      # when OMBRE_DECAY_ENABLED is absent from the host or Compose .env file.
+      - OMBRE_DECAY_ENABLED=${OMBRE_DECAY_ENABLED-}
       # config 放进数据卷（./buckets），而不是单文件挂载 —— 见文件顶部说明。
       # 首启自动生成，Dashboard 改动持久化到这里，重启不丢。
       - OMBRE_CONFIG_PATH=/app/buckets/config.yaml

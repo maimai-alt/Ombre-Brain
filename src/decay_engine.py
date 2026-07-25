@@ -18,7 +18,10 @@ decay_engine.py — 记忆衰减引擎，模拟人类遗忘曲线
 - 不做内容修改、不打标、不调用 LLM
 - 不决定「该不该 hold/grow」，只对已有桶打分
 
-对外暴露：DecayEngine 类（calculate_score / run_once / ensure_started）
+OMBRE_DECAY_ENABLED=false 只关闭本引擎的自动生命周期及其写入；它不是全局
+只读模式，不影响检索、静态评分、用户主动写入或独立 embedding outbox。
+
+对外暴露：DecayEngine 类（calculate_score / run_decay_cycle / ensure_started）
 ========================================
 """
 
@@ -27,7 +30,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from utils import parse_iso_datetime
+from utils import parse_bool, parse_iso_datetime
 
 logger = logging.getLogger("ombre_brain.decay")
 
@@ -132,6 +135,7 @@ class DecayEngine:
     def __init__(self, config: dict, bucket_mgr):
         # --- Load decay parameters / 加载衰减参数 ---
         decay_cfg = config.get("decay", {})
+        self.enabled = parse_bool(decay_cfg.get("enabled", True), default=True)
         self.decay_lambda = decay_cfg.get("lambda", _DEFAULT_LAMBDA)
         self.threshold = decay_cfg.get("threshold", _DEFAULT_THRESHOLD)
         self.check_interval = decay_cfg.get("check_interval_hours", _DEFAULT_CHECK_INTERVAL_HRS)
@@ -147,12 +151,45 @@ class DecayEngine:
         # --- Background task control / 后台任务控制 ---
         self._task: asyncio.Task | None = None
         self._running = False
+        self._last_error = ""
 
     @property
     def is_running(self) -> bool:
         """Whether the decay engine is running in the background.
         衰减引擎是否正在后台运行。"""
-        return self._running
+        return bool(
+            self.enabled
+            and self._running
+            and self._task is not None
+            and not self._task.done()
+        )
+
+    @property
+    def status(self) -> str:
+        """Observable lifecycle state: running, disabled, stopped, or error."""
+        if not self.enabled:
+            return "disabled"
+        if self._last_error:
+            return "error"
+        return "running" if self.is_running else "stopped"
+
+    @staticmethod
+    def _task_error_state(exc: BaseException | None = None) -> str:
+        """Return an observable error marker without retaining exception details."""
+        if exc is None:
+            return "decay cycle failed"
+        return "decay background task failed"
+
+    def _consume_finished_task(self, task: asyncio.Task) -> None:
+        """Retrieve a finished task exception and preserve it as engine state."""
+        if not task.done():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            self._last_error = self._task_error_state(exc)
 
     # ---------------------------------------------------------
     # Core: calculate decay score for a single bucket
@@ -285,6 +322,19 @@ class DecayEngine:
 
         Returns stats: {"checked": N, "archived": N, "lowest_score": X}
         """
+        # The public/manual cycle entry point is guarded too. This prevents
+        # tests, management code, or future callers from bypassing start().
+        if not self.enabled:
+            return {
+                "checked": 0,
+                "archived": 0,
+                "auto_resolved": 0,
+                "demoted_orphans": 0,
+                "backfilled_embeddings": 0,
+                "lowest_score": 0,
+                "disabled": True,
+            }
+
         try:
             buckets = await self.bucket_mgr.list_all(include_archive=False)
         except Exception as e:
@@ -436,16 +486,38 @@ class DecayEngine:
         Ensure the decay engine is started (lazy init on first call).
         确保衰减引擎已启动（懒加载，首次调用时启动）。
         """
-        if not self._running:
+        if not self.enabled:
+            return
+        if self._task is not None and self._task.done():
+            old_task = self._task
+            self._task = None
+            self._running = False
+            self._consume_finished_task(old_task)
+        if not self.is_running:
             await self.start()
 
     async def start(self) -> None:
         """Start the background decay loop.
         启动后台衰减循环。"""
-        if self._running:
+        if not self.enabled:
+            return
+        if self._task is not None and self._task.done():
+            old_task = self._task
+            self._task = None
+            self._running = False
+            self._consume_finished_task(old_task)
+        if self.is_running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._background_loop())
+        try:
+            self._task = asyncio.create_task(
+                self._background_loop(), name="ombre-decay-engine"
+            )
+        except Exception as exc:
+            self._running = False
+            self._task = None
+            self._last_error = self._task_error_state(exc)
+            raise
         logger.info(
             f"Decay engine started, interval: {self.check_interval}h / "
             f"衰减引擎已启动，检查间隔: {self.check_interval} 小时"
@@ -455,24 +527,45 @@ class DecayEngine:
         """Stop the background decay loop.
         停止后台衰减循环。"""
         self._running = False
-        if self._task:
-            self._task.cancel()
+        task = self._task
+        self._task = None
+        if task:
+            if not task.done():
+                task.cancel()
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
+            except Exception as exc:
+                self._last_error = self._task_error_state(exc)
+                logger.error(
+                    "Decay background task stopped after %s",
+                    type(exc).__name__,
+                )
         logger.info("Decay engine stopped / 衰减引擎已停止")
 
     async def _background_loop(self) -> None:
         """Background loop: run decay → sleep → repeat.
         后台循环体：执行衰减 → 睡眠 → 重复。"""
-        while self._running:
-            try:
-                await self.run_decay_cycle()
-            except Exception as e:
-                logger.error(f"Decay cycle error / 衰减周期出错: {e}")
-            # --- Wait for next cycle / 等待下一个周期 ---
-            try:
+        try:
+            while self._running:
+                result = await self.run_decay_cycle()
+                cycle_error = (
+                    result.get("error") if isinstance(result, dict) else None
+                )
+                if cycle_error:
+                    self._last_error = self._task_error_state()
+                else:
+                    # A successful cycle is the recovery boundary for an old error.
+                    self._last_error = ""
                 await asyncio.sleep(self.check_interval * _SECONDS_PER_HOUR)
-            except asyncio.CancelledError:
-                break
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self._last_error = self._task_error_state(exc)
+            logger.error(
+                "Decay background task exited with %s / 衰减后台任务异常退出",
+                type(exc).__name__,
+            )
+        finally:
+            self._running = False

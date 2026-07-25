@@ -2,6 +2,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATE = ROOT / "kernel" / "rust" / "ombre-kernel"
@@ -27,7 +29,9 @@ def test_rust_kernel_scaffold_exports_replay_contract_types():
     assert "pub fn validate" in lib_text
 
 
+@pytest.mark.external
 def test_rust_kernel_cargo_tests_when_toolchain_is_available():
+    """Use only a PATH-visible toolchain with launcher-isolated Rust homes."""
     cargo = shutil.which("cargo")
     assert (CRATE / "Cargo.toml").exists()
     if cargo is None:

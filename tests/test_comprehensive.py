@@ -12,20 +12,10 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 # ---------------------------------------------------------
-# 路径与环境变量（与 conftest.py 保持一致）
+# Import path only. Runtime paths come exclusively from the isolated launcher.
 # ---------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-if not os.environ.get("OMBRE_VAULT_DIR") and not os.environ.get("OMBRE_BUCKETS_DIR"):
-    _test_dir = _REPO_ROOT / "test_buckets_comprehensive"
-    _test_dir.mkdir(exist_ok=True)
-    os.environ["OMBRE_VAULT_DIR"] = str(_test_dir)
-    os.environ["OMBRE_BUCKETS_DIR"] = str(_test_dir)
-
-if not os.environ.get("OMBRE_EMBED_API_KEY"):
-    os.environ["OMBRE_EMBED_API_KEY"] = "__test_dummy__"
-
 
 # ===========================================================
 # 1. utils.py

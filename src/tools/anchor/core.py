@@ -66,6 +66,15 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     if include_archive is None:
         include_archive = False
     await rt.decay_engine.ensure_started()
+    decay_state = getattr(rt.decay_engine, "status", "")
+    if decay_state not in {"running", "disabled", "stopped", "error"}:
+        decay_state = "running" if rt.decay_engine.is_running else "stopped"
+    decay_labels = {
+        "running": "运行中",
+        "disabled": "已禁用（正常配置）",
+        "stopped": "已停止",
+        "error": "故障",
+    }
     try:
         stats = await rt.bucket_mgr.get_stats()
     except Exception as e:
@@ -80,7 +89,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         f"plan 桶: {stats.get('plan_count', 0)} 条\n"
         f"letter 桶: {stats.get('letter_count', 0)} 封\n"
         f"总占用: {stats['total_size_kb']:.1f} KB\n"
-        f"衰减引擎: {'运行中' if rt.decay_engine.is_running else '已停止'}\n"
+        f"衰减引擎: {decay_labels[decay_state]}\n"
     )
 
     # --- 索引/存储一致性检查（iter 2.1+）---

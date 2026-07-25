@@ -407,6 +407,20 @@ python src/server.py
 保留直接依赖的最低版本约束，供维护者升级依赖时重新解析。这样同一版本的 OB
 不会因为安装日期不同而静默得到另一套传递依赖。
 
+### 运行测试
+
+测试不得直接运行裸 `pytest`。开发依赖使用 Python 3.12 锁文件安装，测试统一由
+隔离启动器创建无凭据的临时子进程：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.lock.txt
+.\.venv\Scripts\python.exe scripts/run_isolated_tests.py -m "not external" tests -q
+```
+
+启动器会隔离 HOME、TEMP、配置、bucket、数据库和全部缓存；external 测试默认排除。
+完整边界和中断清理策略见 [docs/TESTING.md](docs/TESTING.md)。
+
 ---
 
 ## 一个大脑多人共用（记忆隔离）/ Multiple Owners
@@ -576,9 +590,14 @@ docker compose -f deploy/docker-compose.yml up -d
 | `embedding.background_indexing` | 原文落盘后由耐久后台队列生成向量 | `true` |
 | `embedding.retry_base_seconds` / `retry_max_seconds` | 向量失败后的指数退避起点 / 上限 | `5` / `300` |
 | `decay.lambda` | 衰减速率，越大越快忘 | `0.05` |
+| `decay.enabled` | 是否运行 DecayEngine 后台自动周期；环境变量 `OMBRE_DECAY_ENABLED` 优先 | `true` |
 | `merge_threshold` | 合并相似度阈值 (0-100) | `75` |
 | `hooks.token` | `/breath-hook` 的 HTTP token | 自托管公网建议设置 |
 | `hooks.allow_public` | 是否允许 hook 无鉴权访问 | `false` |
+
+`/health` 的顶层 `status` 表示 HTTP 服务是否可响应；DecayEngine 的独立状态请读取
+`decay_engine` 字段（`running` / `disabled` / `stopped` / `error`）。配置为 `disabled`
+不会令整个服务进入故障状态。
 
 > ⚠️ **`dehydration.max_tokens` 不能太小**：Gemini 2.5 系列模型有「思考 token」开销，如果 max_tokens 设得太小（如 256/512），思考 token 会耗尽预算，JSON 响应被截断，导致所有记忆被错误分类为「未分类」。推荐 `gemini-2.0-flash`（无思考开销）或将 max_tokens 设为 `4096` 以上。
 

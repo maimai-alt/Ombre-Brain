@@ -15,7 +15,12 @@ import pytest
 
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
-pytestmark = pytest.mark.skipif(not MCP_URL, reason="Docker MCP integration service is not configured")
+pytestmark = [
+    pytest.mark.external,
+    pytest.mark.skipif(
+        not MCP_URL, reason="Docker MCP integration service is not configured"
+    ),
+]
 
 EXPECTED_TOOLS = {
     "breath",

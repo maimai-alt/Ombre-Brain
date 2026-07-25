@@ -1323,21 +1323,38 @@ async def build_system_diagnostics() -> dict[str, Any]:
         action=auth_action,
     ))
 
-    decay_engine = sh.decay_engine
-    decay_running = bool(getattr(decay_engine, "is_running", False))
+    decay_state = sh.decay_engine_status()
+    decay_status = {
+        "running": "ok",
+        "disabled": "ok",
+        "stopped": "warning",
+        "error": "error",
+    }[decay_state]
+    decay_message = {
+        "running": "服务运行中，衰减引擎已启动",
+        "disabled": "服务运行中，衰减引擎按配置禁用",
+        "stopped": "服务运行中，但已启用的衰减引擎未运行",
+        "error": "服务运行中，但衰减引擎发生故障",
+    }[decay_state]
     checks.append(_check(
         "runtime",
         "运行时",
-        "ok" if decay_running else "warning",
-        "服务运行中，衰减引擎已启动" if decay_running else "服务运行中，但衰减引擎未运行",
+        decay_status,
+        decay_message,
         details={
             "version": sh.version,
             "uptime_s": int(time.time() - sh._SERVER_START_TS),
             "repo_root": sh.repo_root,
             "in_docker": sh.in_docker(),
-            "decay_engine": "running" if decay_running else "stopped",
+            "decay_engine": decay_state,
         },
-        action="如长期停止，请重启服务并查看日志" if not decay_running else "",
+        action=(
+            "如长期停止，请重启服务并查看日志"
+            if decay_state == "stopped"
+            else "查看服务日志中的衰减周期错误"
+            if decay_state == "error"
+            else ""
+        ),
     ))
 
     summary = {"ok": 0, "warning": 0, "error": 0}
@@ -1365,7 +1382,7 @@ def register(mcp) -> None:
             "ts": time.time(),
             "uptime_s": int(time.time() - sh._SERVER_START_TS),
             "last_op_ts": sh._LAST_OP_TS,
-            "decay_engine": "running" if sh.decay_engine.is_running else "stopped",
+            "decay_engine": sh.decay_engine_status(),
         })
 
     @mcp.custom_route("/api/system/diagnostics", methods=["GET"])

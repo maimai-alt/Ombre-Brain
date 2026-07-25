@@ -3544,7 +3544,7 @@ async function loadSettingsStatus() {
     el.innerHTML = `
       <b>版本</b>：${esc(d.version)}<br>
       <b>Bucket 总数</b>：${Number(d.buckets?.total ?? 0)} （永久:${Number(d.buckets?.permanent ?? 0)} / 动态:${Number(d.buckets?.dynamic ?? 0)} / 归档:${Number(d.buckets?.archive ?? 0)}）<br>
-      <b>衰减引擎</b>：${esc(d.decay_engine)}<br>
+      <b>衰减引擎</b>：${esc(({running:'运行中',disabled:'已禁用',stopped:'已停止',error:'故障'})[d.decay_engine] || d.decay_engine)}<br>
       <b>向量搜索</b>：${d.embedding_enabled ? '已启用' : '未启用'}<br>
     `;
   } catch(e) {
@@ -7376,8 +7376,9 @@ async function pollHeartbeat() {
     const d = await r.json();
     dot.style.background = '#3a9b5c';
     const idle = Math.floor((Date.now()/1000) - (d.last_op_ts || 0));
-    var decaying = d.decay_engine === 'running';
-    txt.textContent = '在线 · ' + (decaying ? '衰减运行中' : '衰减停');
+    var decayLabels = {running:'衰减运行中', disabled:'衰减已禁用', stopped:'衰减已停止', error:'衰减故障'};
+    txt.textContent = '在线 · ' + (decayLabels[d.decay_engine] || '衰减状态未知');
+    if (d.decay_engine === 'error') dot.style.background = '#c45a3a';
     txt.title = 'uptime ' + d.uptime_s + 's · 上次活跃 ' + idle + 's 前';
     dot.classList.add('breathing');   // 在线即呼吸，衰减状态只影响文字
   } catch (e) {

@@ -91,10 +91,14 @@ def register(mcp) -> None:
         from starlette.responses import JSONResponse
         try:
             stats = await sh.bucket_mgr.get_stats()
+            decay_state = sh.decay_engine_status()
             return JSONResponse({
+                # This endpoint is a service liveness contract. Component state is
+                # reported separately so a DecayEngine fault does not hide an
+                # otherwise responsive read/write service from deployment probes.
                 "status": "ok",
                 "buckets": stats["permanent_count"] + stats["dynamic_count"],
-                "decay_engine": "running" if sh.decay_engine.is_running else "stopped",
+                "decay_engine": decay_state,
             })
         except Exception as e:
             return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)

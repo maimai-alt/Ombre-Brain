@@ -23,15 +23,38 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
+        run: pip install --require-hashes -r requirements-dev.lock.txt
+
+      - name: Run isolation and DecayEngine regression tests
+        run: >-
+          python scripts/run_isolated_tests.py -m "not external"
+          tests/test_decay_switch.py
+          tests/test_system_diagnostics.py
+          tests/test_isolated_launcher.py
+          tests/test_test_isolation.py
+          -q
+
+      - name: Run complete offline test suite
+        run: python scripts/run_isolated_tests.py -m "not external" tests -q
+
+      - name: Check Docker Compose availability
+        id: compose
+        shell: bash
         run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          if docker compose version >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Compose is available; static Compose tests are required."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Compose is unavailable; static Compose tests are skipped."
+          fi
 
-      - name: Run local tests (no API key needed)
-        run: python -m pytest tests/test_scoring.py tests/test_feel_flow.py -v --asyncio-mode=auto
+      - name: Run isolated Docker Compose config tests
+        if: steps.compose.outputs.available == 'true'
+        run: >-
+          python scripts/run_isolated_tests.py -m "not external"
+          tests/test_decay_compose.py -q
 
-      - name: Run LLM quality tests
-        if: env.OMBRE_API_KEY != ''
-        env:
-          OMBRE_API_KEY: ${{ secrets.OMBRE_API_KEY }}
-        run: python -m pytest tests/test_llm_quality.py -v --asyncio-mode=auto
+      - name: Report Docker Compose test skip
+        if: steps.compose.outputs.available != 'true'
+        run: echo "::notice::Skipping tests/test_decay_compose.py because docker compose is unavailable on this runner."

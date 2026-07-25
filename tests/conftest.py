@@ -7,36 +7,214 @@
 # 重要：所有测试在临时目录运行，绝不触碰真实记忆数据。
 # ============================================================
 
+import json
 import os
+import shutil
 import sys
+import tempfile
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from tests.isolation_support import (
+    SESSION_PATH_ENV_KEYS,
+    mark_external_items_skipped,
+)
+
 # ------------------------------------------------------------
-# iter 1.8: 必须在任何 src/* 导入之前设置 OMBRE_BUCKETS_DIR
-# iter 1.9 F: 统一推荐 OMBRE_VAULT_DIR；测试也优先用新名
-# Must set OMBRE_VAULT_DIR / OMBRE_BUCKETS_DIR BEFORE any test
-# imports src/server.py, because server.py runs load_config() at
-# import time which mkdirs /data.
+# The launcher creates and owns the process environment before Python starts.
+# Refuse collection before importing production modules when that boundary is
+# absent; conftest never snapshots or restores a caller's environment.
 # ------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_TEST_BUCKETS = _REPO_ROOT / "test_buckets"
-_TEST_BUCKETS.mkdir(exist_ok=True)
-if not os.environ.get("OMBRE_VAULT_DIR") and not os.environ.get("OMBRE_BUCKETS_DIR"):
-    # iter 1.9 F: 设两个变量同步指向同一目录，避免某个测试用 monkeypatch 覆盖单个变量
-    # 时被另一个变量「卡住」。两者都指向 test_buckets 时，谁优先都不影响测试结果。
-    os.environ["OMBRE_VAULT_DIR"] = str(_TEST_BUCKETS)
-    os.environ["OMBRE_BUCKETS_DIR"] = str(_TEST_BUCKETS)
+_ISOLATION_SENTINEL = ".ombre-test-isolated"
+_ISOLATION_SENTINEL_CONTENT = "ombre isolated pytest root"
 
-# F-09: embedding.enabled=true 时无 key 会拒绝启动。测试环境注入 dummy key，
-# 避免 `import server`（模块级导入）触发 SystemExit。
-# 真实 API 调用在测试中均被 mock，dummy key 不会发起网络请求。
-if not os.environ.get("OMBRE_EMBED_API_KEY"):
-    os.environ["OMBRE_EMBED_API_KEY"] = "__test_dummy__"
+
+def _fail_unisolated(reason: str) -> None:
+    raise pytest.UsageError(
+        f"Refusing unisolated pytest execution ({reason}). "
+        "Use: python scripts/run_isolated_tests.py -m \"not external\" tests -q"
+    )
+
+
+if os.environ.get("OMBRE_TEST_ISOLATED") != "1":
+    _fail_unisolated("launcher marker missing")
+if os.environ.get("PYTHONNOUSERSITE") != "1":
+    _fail_unisolated("Python user site is not disabled")
+if os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD") != "1":
+    _fail_unisolated("pytest plugin autoload is not disabled")
+
+_root_text = os.environ.get("OMBRE_TEST_ROOT", "")
+if not _root_text:
+    _fail_unisolated("temporary root missing")
+_SESSION_ROOT = Path(_root_text).resolve()
+_sentinel = _SESSION_ROOT / _ISOLATION_SENTINEL
+try:
+    if _sentinel.read_text(encoding="utf-8").strip() != _ISOLATION_SENTINEL_CONTENT:
+        _fail_unisolated("temporary root sentinel invalid")
+except OSError:
+    _fail_unisolated("temporary root sentinel unavailable")
+
+
+def _require_inside_session(path_value: str, label: str) -> Path:
+    try:
+        path = Path(path_value).resolve()
+        if not path.is_relative_to(_SESSION_ROOT):
+            _fail_unisolated(f"{label} is outside temporary root")
+        return path
+    except (OSError, ValueError):
+        _fail_unisolated(f"{label} is invalid")
+
+
+for _key in SESSION_PATH_ENV_KEYS:
+    _value = os.environ.get(_key, "")
+    if not _value:
+        _fail_unisolated(f"{_key} missing")
+    _require_inside_session(_value, _key)
+
+if sys.pycache_prefix is None:
+    _fail_unisolated("Python bytecode cache prefix missing")
+_require_inside_session(sys.pycache_prefix, "Python bytecode cache prefix")
+
+tempfile.tempdir = str(_require_inside_session(os.environ["TEMP"], "TEMP"))
+
+
+def _remove_repository_test_caches() -> None:
+    """Remove only known Python/pytest caches inside repository code trees."""
+    cache_root = _REPO_ROOT / ".pytest_cache"
+    if cache_root.exists() and not cache_root.is_symlink():
+        shutil.rmtree(cache_root)
+    root_bytecode = _REPO_ROOT / "__pycache__"
+    if root_bytecode.exists() and not root_bytecode.is_symlink():
+        shutil.rmtree(root_bytecode)
+    for root_pyc in _REPO_ROOT.glob("*.pyc"):
+        if root_pyc.is_file() and not root_pyc.is_symlink():
+            root_pyc.unlink()
+    for root_name in ("src", "tests", "scripts", "deploy", "tools"):
+        scan_root = _REPO_ROOT / root_name
+        if not scan_root.is_dir() or scan_root.is_symlink():
+            continue
+        for cache_dir in scan_root.rglob("__pycache__"):
+            if (
+                cache_dir.is_dir()
+                and not cache_dir.is_symlink()
+                and cache_dir.resolve().is_relative_to(_REPO_ROOT)
+            ):
+                shutil.rmtree(cache_dir)
+        for pyc_file in scan_root.rglob("*.pyc"):
+            if pyc_file.is_file() and pyc_file.resolve().is_relative_to(_REPO_ROOT):
+                pyc_file.unlink()
+
+
+_remove_repository_test_caches()
+
+
+def _create_runtime_paths(root: Path) -> dict[str, Path]:
+    """Create one per-test Ombre runtime below the launcher-owned root."""
+    root = _require_inside_session(str(root), "per-test runtime")
+    vault = root / "vault"
+    log_dir = root / "logs"
+    code_dir = root / "code"
+    host_vault = root / "host-vault"
+    for directory in (
+        vault,
+        log_dir,
+        code_dir,
+        host_vault,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    config_path = root / "config.yaml"
+    embedding_db = vault / "embeddings.db"
+    config_path.write_text(
+        json.dumps(
+            {
+                "buckets_dir": str(vault),
+                "embedding": {
+                    "enabled": False,
+                    "background_indexing": True,
+                    "db_path": str(embedding_db),
+                },
+                "decay": {"enabled": True, "check_interval_hours": 24},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "root": root,
+        "vault": vault,
+        "home": Path(os.environ["HOME"]),
+        "config": config_path,
+        "embedding_db": embedding_db,
+        "outbox": vault / ".embedding_outbox.json",
+        "project_env": root / "project.env",
+        "host_vault": host_vault,
+        "code": code_dir,
+        "logs": log_dir,
+    }
 
 # Ensure src/ is importable
 sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-external",
+        action="store_true",
+        default=False,
+        help="run tests that contact an explicitly configured LLM or Docker service",
+    )
+
+
+def pytest_configure(config):
+    cache_dir = _require_inside_session(
+        str(config.getini("cache_dir")), "pytest cache_dir"
+    )
+    basetemp = getattr(config.option, "basetemp", None)
+    if basetemp is None:
+        _fail_unisolated("pytest basetemp missing")
+    _require_inside_session(str(basetemp), "pytest basetemp")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    config.addinivalue_line(
+        "markers",
+        "external: requires an explicitly configured external network or Docker service",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-external"):
+        return
+    skip_external = pytest.mark.skip(reason="external tests require --run-external")
+    mark_external_items_skipped(items, skip_external)
+
+
+@pytest.fixture(scope="session")
+def isolated_session_root():
+    """Expose the validated launcher root without importing conftest as a module."""
+    return _SESSION_ROOT
+
+
+@pytest.fixture(autouse=True)
+def isolated_test_environment(request, tmp_path, monkeypatch):
+    """Give every default test its own runtime within the launcher root."""
+    if request.node.get_closest_marker("external") and request.config.getoption(
+        "--run-external"
+    ):
+        return None
+    paths = _create_runtime_paths(tmp_path / "runtime")
+    per_test_env = {
+        "OMBRE_VAULT_DIR": paths["vault"],
+        "OMBRE_BUCKETS_DIR": paths["vault"],
+        "OMBRE_CONFIG_PATH": paths["config"],
+        "OMBRE_HOST_VAULT_DIR": paths["host_vault"],
+        "OMBRE_CODE_DIR": paths["code"],
+        "OMBRE_LOG_DIR": paths["logs"],
+        "OMBRE_LOG_FILE": paths["logs"] / "pytest.log",
+        "OMBRE_TEST_PROJECT_ENV_PATH": paths["project_env"],
+    }
+    for key, path in per_test_env.items():
+        monkeypatch.setenv(key, str(path))
+    return paths
 
 
 @pytest.fixture
@@ -71,14 +249,14 @@ def test_config(tmp_path):
             "emotion_weights": {"base": 1.0, "arousal_boost": 0.8},
         },
         "dehydration": {
-            "api_key": os.environ.get("OMBRE_COMPRESS_API_KEY", "test-key"),
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "model": "gemini-2.5-flash-lite",
+            "api_key": "",
+            "base_url": "http://127.0.0.1:9/test-only",
+            "model": "test-model",
         },
         "embedding": {
-            "api_key": os.environ.get("OMBRE_EMBED_API_KEY", ""),
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-            "model": "gemini-embedding-001",
+            "api_key": "",
+            "base_url": "http://127.0.0.1:9/test-only",
+            "model": "test-embedding-model",
             "enabled": False,
         },
     }

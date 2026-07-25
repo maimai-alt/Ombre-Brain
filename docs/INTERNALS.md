@@ -59,6 +59,7 @@ Ombre-Brain/
 ├── src/                # 所有运行期 Python 源码（server.py / bucket_manager / dehydrator / ...）
 ├── tools/              # CLI 一次性脚本：backfill / migrate / reclassify / check_*
 ├── tests/              # pytest 测试套件（unit / integration / regression）
+├── scripts/            # 隔离 pytest 启动器等仓库维护入口
 ├── docs/               # INTERNALS / BEHAVIOR_SPEC / ENV_VARS / CLAUDE_PROMPT
 ├── frontend/           # dashboard.html
 ├── deploy/             # docker-compose.yml / docker-compose.user.yml
@@ -74,6 +75,8 @@ Ombre-Brain/
 
 入口固定为 `python src/server.py`。`utils.load_config()` 自动按
 `$OMBRE_CONFIG_PATH` → `cwd/config.yaml` → `<repo_root>/config.yaml` 的顺序查找配置。
+测试入口固定为 `python scripts/run_isolated_tests.py ...`；不得直接运行裸 pytest，
+详见 `docs/TESTING.md`。
 
 ```
                     ┌──────────────┐

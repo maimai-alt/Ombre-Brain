@@ -73,7 +73,9 @@ class FakeBucketManager:
 
 
 class FakeDecayEngine:
-    is_running = True
+    def __init__(self, status="running"):
+        self.status = status
+        self.is_running = status == "running"
 
 
 class StandbyEmbeddingEngine:
@@ -99,7 +101,18 @@ class FakeGithubSync:
 
 
 @pytest.mark.asyncio
-async def test_system_diagnostics_reports_missing_ai_configuration(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("decay_state", "runtime_status"),
+    [
+        ("running", "ok"),
+        ("disabled", "ok"),
+        ("stopped", "warning"),
+        ("error", "error"),
+    ],
+)
+async def test_system_diagnostics_reports_missing_ai_configuration(
+    monkeypatch, tmp_path, decay_state, runtime_status
+):
     buckets_dir = tmp_path / "buckets"
     buckets_dir.mkdir()
     server_src = tmp_path / "src"
@@ -228,7 +241,7 @@ Diagnostics regression tests.
         "github_sync": {"repo": "owner/repo", "branch": "main", "path_prefix": "ombre"},
     })
     monkeypatch.setattr(system.sh, "bucket_mgr", FakeBucketManager())
-    monkeypatch.setattr(system.sh, "decay_engine", FakeDecayEngine())
+    monkeypatch.setattr(system.sh, "decay_engine", FakeDecayEngine(decay_state))
     monkeypatch.setattr(system.sh, "embedding_engine", StandbyEmbeddingEngine())
     monkeypatch.setattr(system.sh, "github_sync_instance", FakeGithubSync())
     monkeypatch.setattr(system.sh, "version", "2.4.8")
@@ -249,6 +262,8 @@ Diagnostics regression tests.
     assert payload["ok"] is False
     assert payload["summary"]["error"] >= 2
     assert by_id["storage"]["status"] == "ok"
+    assert by_id["runtime"]["status"] == runtime_status
+    assert by_id["runtime"]["details"]["decay_engine"] == decay_state
     assert by_id["auth"]["status"] == "error"
     assert by_id["auth"]["details"]["public_exposure_risk"] is True
     assert "隧道" in by_id["auth"]["message"]

@@ -23,10 +23,13 @@ def _configured_base_url() -> str:
 
 
 BASE_URL = _configured_base_url()
-pytestmark = pytest.mark.skipif(
-    not BASE_URL,
-    reason="Docker Web integration service is not configured",
-)
+pytestmark = [
+    pytest.mark.external,
+    pytest.mark.skipif(
+        not BASE_URL,
+        reason="Docker Web integration service is not configured",
+    ),
+]
 
 
 def test_desktop_management_api_first_run_and_authenticated_flow():
