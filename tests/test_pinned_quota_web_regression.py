@@ -81,7 +81,23 @@ def pinned_quota_runtime(monkeypatch):
     monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr, raising=False)
     monkeypatch.setattr(rt, "config", {"limits": {"max_pinned": 1}}, raising=False)
     monkeypatch.setattr(rt, "logger", DummyLogger(), raising=False)
+    # 本 fork 默认取消配额；这里打回原作者模式，继续锁住配额生效时的拦截逻辑
+    monkeypatch.setattr("tools._common._QUOTAS_DISABLED", False)
     return bucket_mgr
+
+
+@pytest.mark.asyncio
+async def test_bucket_pin_route_allows_pin_when_quotas_disabled(pinned_quota_runtime, monkeypatch):
+    monkeypatch.setattr("tools._common._QUOTAS_DISABLED", True)
+    mcp = FakeMcp()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes["/api/bucket/{bucket_id}/pin"](
+        FakeRequest(path_params={"bucket_id": "plain"})
+    )
+
+    assert response.status_code == 200
+    assert pinned_quota_runtime.rows["plain"]["metadata"]["pinned"] is True
 
 
 def _json(response):

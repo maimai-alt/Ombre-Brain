@@ -61,6 +61,11 @@ _DEFAULT_MAX_QUERY_BYTES = 16 * 1024
 _DEFAULT_MAX_METADATA_BYTES = 16 * 1024
 _DEFAULT_MAX_GROW_ITEMS = 100
 
+# --- 本 fork：取消 pinned 与 importance≥9 两个数量上限 ---
+# True 时 max_pinned() 恒为 0（不限钉选数）、enforce_high_importance_quota 不再降级。
+# 想恢复原作者的稀缺配额，改回 False 即可。
+_QUOTAS_DISABLED = True
+
 # --- importance≥9 配额（rule.md §1.0 哲学） ---
 _HIGH_IMP_THRESHOLD = 9                # importance 达到该值算“高重要度”
 _HIGH_IMP_HARD_CAP = 24                # 高重要度桶硬上限
@@ -235,6 +240,10 @@ def max_bucket_bytes() -> int:
 
 
 def max_pinned() -> int:
+    # 本 fork 取消 pinned 上限：线上 config.yaml 在持久卷里、首次部署时已写死
+    # max_pinned: 20，改配置模板不生效，所以直接在代码里恒返回 0（=禁用检查）。
+    if _QUOTAS_DISABLED:
+        return 0
     return _configured_limit("max_pinned", _DEFAULT_MAX_PINNED)
 
 
@@ -455,7 +464,7 @@ async def enforce_high_importance_quota(importance: int) -> int:
     - 当前数 ≥ 软阈值 → push OB-W003（仅提醒，不动数据）
     返回最终生效的 importance。
     """
-    if importance < _HIGH_IMP_THRESHOLD:
+    if _QUOTAS_DISABLED or importance < _HIGH_IMP_THRESHOLD:
         return importance
     cur = await count_high_importance()
     if cur >= _HIGH_IMP_HARD_CAP:

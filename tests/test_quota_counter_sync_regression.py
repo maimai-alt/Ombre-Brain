@@ -31,6 +31,27 @@ class EchoDehydrator:
         return content
 
 
+@pytest.fixture(autouse=True)
+def _restore_upstream_quotas(monkeypatch):
+    # 本 fork 默认取消配额；本文件锁的是配额生效时的计数同步，打回原作者模式测
+    monkeypatch.setattr("tools._common._QUOTAS_DISABLED", False)
+
+
+@pytest.mark.asyncio
+async def test_fork_disables_pinned_and_high_importance_caps(bucket_mgr, monkeypatch):
+    monkeypatch.setattr("tools._common._QUOTAS_DISABLED", True)
+    install_runtime(bucket_mgr, limits={"max_pinned": 1})
+    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 1)
+
+    await bucket_mgr.create(content="已钉", pinned=True)
+    await bucket_mgr.create(content="已高重要", importance=9)
+
+    # 配置写着上限 1、已满，也照样能钉、importance=9 也不被降级
+    assert await enforce_pinned_quota(True) is True
+    assert await enforce_high_importance_quota(9) == 9
+    assert await enforce_high_importance_quota(10) == 10
+
+
 def install_runtime(bucket_mgr, limits=None):
     rt.config = {"surfacing": {}, "limits": limits or {}}
     rt.bucket_mgr = bucket_mgr
