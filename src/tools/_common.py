@@ -39,6 +39,8 @@ import threading
 import time
 import uuid
 
+from bucket_scoring import merge_relevance
+
 from . import _runtime as rt
 
 _EMBED_WARN = (
@@ -532,6 +534,44 @@ def append_plan_change_log(old_history, action: str, **fields) -> list:
     return history
 
 
+_MERGE_CANDIDATES = 10   # 合并时从 search 取多少个候选来比正文
+_MERGE_VECTOR_TOPK = 50  # 与 bucket_manager._VECTOR_TOPK 一致
+
+
+async def _merge_vector_scores(content: str) -> dict:
+    """新内容和各桶的语义相似度；向量不可用或失败时返回 {}（只按正文重合度判断）。"""
+    engine = getattr(rt, "embedding_engine", None)
+    if not engine or not getattr(engine, "enabled", False):
+        return {}
+    try:
+        return {bid: float(score) for bid, score in await engine.search_similar(content, top_k=_MERGE_VECTOR_TOPK)}
+    except Exception as e:
+        rt.logger.warning(f"Merge semantic scores unavailable, using text overlap only: {e}")
+        return {}
+
+
+def _best_merge_candidate(content: str, candidates: list, vector_scores: dict) -> list:
+    """
+    在候选里挑「和新内容最像」的那一个（钉选/保护桶不参与），
+    把它的 score 换成 merge_relevance，返回 [桶] 或 []。
+    """
+    best = None
+    best_score = -1.0
+    for bucket in candidates or []:
+        meta = bucket.get("metadata") or {}
+        if meta.get("pinned") or meta.get("protected"):
+            continue
+        score = merge_relevance(content, bucket.get("content", ""), vector_scores.get(bucket.get("id")))
+        if score > best_score:
+            best, best_score = bucket, score
+    if best is None:
+        return []
+    best = dict(best)
+    best["search_score"] = best.get("score")
+    best["score"] = best_score
+    return [best]
+
+
 async def merge_or_create(
     content: str,
     tags: list,
@@ -589,13 +629,26 @@ async def _merge_or_create_inner(
     meaning: str = "",
     media: list | None = None,
 ) -> Tuple[str, bool, str]:
-    """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。"""
+    """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。
+
+    合并门（2026-11-22 改）：search() 只负责找候选，**要不要合并只看
+    merge_relevance**（语义 + 正文重合度），不再拿 search 的七维排序分去比
+    merge_threshold —— 那个分数里有桶名/标签/重要度/新旧/被想起次数，会把长
+    内容吸进「重要、常被想起」的桶。见 bucket_scoring.merge_relevance。
+    """
     exact_storage_match = False
+    vector_scores = await _merge_vector_scores(content)
     try:
-        existing = await rt.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
+        candidates = await rt.bucket_mgr.search(
+            content,
+            limit=_MERGE_CANDIDATES,
+            domain_filter=domain or None,
+            vector_scores=vector_scores,
+        )
     except Exception as e:
         rt.logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
-        existing = []
+        candidates = []
+    existing = _best_merge_candidate(content, candidates, vector_scores)
 
     # Cache invalidation and a concurrent list_all() refresh can cross: an old
     # parsed snapshot may briefly hide a bucket that is already durable on disk.
@@ -667,7 +720,8 @@ async def _merge_or_create_inner(
                 rt.logger.info(
                     f"op=merge_or_create phase=branch branch=merge bucket_id={bucket['id']} "
                     f"raw_merge={int(raw_merge)} source_tool={source_tool or '_'} "
-                    f"score={existing[0].get('score', 0):.3f}"
+                    f"score={existing[0].get('score', 0):.3f} "
+                    f"search_score={existing[0].get('search_score') or 0:.3f}"
                 )
                 return bucket["id"], True, ""
             except Exception as e:

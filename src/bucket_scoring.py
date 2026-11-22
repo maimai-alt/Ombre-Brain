@@ -17,8 +17,11 @@ self.embedding_engine / self._bm25 等实例状态，硬抽出去反而增加耦
 - 不读 bucket 文件、不碰 self.config（topic 分需要的 content_weight 由
   调用方显式传入，不在这里读配置）
 
+另有 merge_relevance：hold/grow 判断「要不要并进一个老桶」专用的分数，
+只看两段正文像不像（见该函数说明）。
+
 对外暴露：calc_topic_score / calc_emotion_score / calc_time_score /
-         calc_touch_score
+         calc_touch_score / content_overlap / merge_relevance
 ========================================
 """
 
@@ -140,3 +143,54 @@ def calc_touch_score(meta: dict) -> float:
     """
     count = float(meta.get("activation_count") or 0)
     return min(count / TOUCH_NORMALIZE_CAP, 1.0)
+
+
+# ---------------------------------------------------------
+# Merge relevance (hold / grow 自动合并的门)
+# ---------------------------------------------------------
+# 以前 merge_or_create 直接拿 search() 的七维排序分去和 merge_threshold 比。
+# 那个分数回答的是「这条记忆该不该被想起来、排第几」，里面有：
+#   - 桶名 / 主题域 / 标签的 partial_ratio：查询一长（日记、信），短短的
+#     桶名、标签几乎必然整段出现在查询里，直接拿满分；
+#   - BM25 按本次最高分归一，排第一的桶永远是 1.0；
+#   - 重要度、新旧、被想起次数、情绪 —— 和「两段话是不是同一件事」无关。
+# 结果是长内容会被吸进「重要、常被想起」的桶（2026-11-15 一整篇周记被并进
+# 锚点桶「Ink的诞生与命名」，score 78.07），并且越并越像，滚雪球。
+#
+# 合并的问题只有一个：「新的这段，是不是老桶里那件事的又一份」。所以这里只看
+# 正文：语义相似度 + 正文重合度，各占一半。2026-11-22 在真实记忆副本上量过：
+#   不同的日记之间语义 0.78~0.86，但正文重合只有 0.13~0.16 → 约 50 分；
+#   同一条记忆的两个版本 → 75~100 分。门槛仍用 merge_threshold（默认 75）。
+MERGE_SEMANTIC_W = 0.5
+MERGE_OVERLAP_W = 0.5
+
+
+def content_overlap(new: str, old: str) -> float:
+    """
+    How much of ``new`` is already in ``old`` (0~1).
+
+    新内容比老桶短：用 partial_ratio（新的这段能不能在老桶里找到对应的一段）；
+    新内容比老桶长：用整体 ratio —— 一段长文不能因为「包含了老桶那几句话」
+    就被当成老桶的又一份，否则长文会把短桶吞进来。
+    """
+    new = (new or "").strip()
+    old = (old or "").strip()
+    if not new or not old:
+        return 0.0
+    if len(new) <= len(old):
+        return fuzz.partial_ratio(new, old) / 100.0
+    return fuzz.ratio(new, old) / 100.0
+
+
+def merge_relevance(new: str, old: str, semantic: Optional[float] = None) -> float:
+    """
+    Merge gate score (0~100): is ``new`` another copy of what ``old`` holds?
+
+    只用正文：semantic（余弦相似度，没有就不算）和 content_overlap。
+    不看桶名、标签、主题域、重要度、新旧、被想起次数、情绪。
+    """
+    overlap = content_overlap(new, old)
+    if semantic is None:
+        return overlap * 100.0
+    sem = min(1.0, max(0.0, float(semantic)))
+    return (sem * MERGE_SEMANTIC_W + overlap * MERGE_OVERLAP_W) / (MERGE_SEMANTIC_W + MERGE_OVERLAP_W) * 100.0
